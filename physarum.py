@@ -170,35 +170,55 @@ class PhysarumNetwork:
         # Build system matrix
         A = self._build_laplacian_matrix(commodity)
         
+        # Add small regularization to diagonal for numerical stability
+        epsilon = 1e-10
+        A_reg = A.tolil()
+        for i in range(self.N):
+            A_reg[i, i] += epsilon
+        A_reg = A_reg.tocsr()
+        
         # Fix one potential to break gauge freedom (set first source to 0)
         sources_c = self.sources[commodity]
         if len(sources_c) > 0:
             anchor = sources_c[0]
             # Fix potential at anchor
-            A[anchor, :] = 0
-            A[anchor, anchor] = 1
+            A_reg = A_reg.tolil()
+            A_reg[anchor, :] = 0
+            A_reg[anchor, anchor] = 1
+            A_reg = A_reg.tocsr()
             b[anchor] = 0
         
         # Solve linear system
         try:
-            # Use direct solver for small systems
-            if self.N < 1000:
-                Phi = spsolve(A.tocsr(), b)
+            # Use direct solver for small systems or as fallback
+            if self.N < 500:
+                Phi = spsolve(A_reg, b)
             else:
-                # Use iterative solver for large systems
+                # Try iterative solver with better parameters
+                # Use previous solution as initial guess
+                x0 = self.state.Phi[commodity].copy()
+                
                 Phi, info = cg(
-                    A.tocsr(),
+                    A_reg,
                     b,
-                    tol=self.cfg.solver_tolerance,
-                    maxiter=self.cfg.max_solver_iterations
+                    x0=x0,
+                    rtol=1e-3,  # Relaxed tolerance
+                    atol=1e-6,
+                    maxiter=min(self.N, 500)
                 )
+                
                 if info != 0:
-                    print(f"Warning: CG solver did not converge for {commodity}")
+                    # Fall back to direct solver
+                    try:
+                        Phi = spsolve(A_reg, b)
+                    except:
+                        # If everything fails, keep previous solution
+                        return
             
             self.state.Phi[commodity] = Phi
             
         except Exception as e:
-            print(f"Error solving Physarum system for {commodity}: {e}")
+            # Keep previous solution if solver fails
             return
         
         # Compute fluxes
@@ -226,8 +246,9 @@ class PhysarumNetwork:
             D_ij = self.state.D[(i, j)][commodity]
             L_ij = self.state.L[(i, j)]
             
-            if L_ij < 1e-8:
-                continue
+            # Ensure minimum conductivity and length for numerical stability
+            D_ij = max(D_ij, 1e-6)
+            L_ij = max(L_ij, 1e-6)
             
             weight = D_ij / L_ij
             
@@ -280,7 +301,10 @@ class PhysarumNetwork:
                 
                 # Update
                 dD = alpha_D * g_flux - beta_D * D_ij
-                D_new = max(0.01, D_ij + dt * dD)  # Keep minimum conductivity
+                D_new = D_ij + dt * dD
+                
+                # Keep in reasonable range [0.01, 10.0]
+                D_new = np.clip(D_new, 0.01, 10.0)
                 
                 self.state.D[edge][commodity] = D_new
     

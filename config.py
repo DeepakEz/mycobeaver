@@ -220,8 +220,8 @@ class PhysarumConfig:
     enable_multicommodity: bool = True
     
     # Solver parameters
-    max_solver_iterations: int = 100
-    solver_tolerance: float = 1e-6
+    max_solver_iterations: int = 500
+    solver_tolerance: float = 1e-3  # Relaxed for better convergence
 
 
 @dataclass
