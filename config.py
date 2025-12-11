@@ -69,24 +69,24 @@ class WorldConfig:
 @dataclass
 class HydrologyConfig:
     """Hydrology dynamics parameters (§3)"""
-    # Base conductance
-    g0: float = 0.5
+    # Base conductance - INCREASED for faster drainage
+    g0: float = 2.0  # Was 0.5, now 4x higher
     
-    # Loss rates
-    alpha_evap: float = 0.001
-    alpha_seep: float = 0.002
+    # Loss rates - DRAMATICALLY INCREASED to balance water budget
+    alpha_evap: float = 0.025  # Second fix: Reduced from 0.04 (2.5% loss per step)
+    alpha_seep: float = 0.015  # Second fix: Reduced from 0.03 (1.5% loss per step)
     
-    # Rainfall parameters
-    mean_rainfall: float = 0.05
-    rainfall_std: float = 0.02
+    # Rainfall parameters - REDUCED to prevent flooding
+    mean_rainfall: float = 0.04  # Fourth adjustment: Increased from 0.03 to ensure h>0
+    rainfall_std: float = 0.01   # Slightly increased for variability
     
-    # Boundary inflow (for river source cells)
-    boundary_inflow: float = 0.5
+    # Boundary inflow (for river source cells) - INCREASED AGAIN
+    boundary_inflow: float = 0.40  # Fourth adjustment: Increased from 0.30
     
     # Thresholds
-    h_wet: float = 1.5  # Water depth threshold for wetness
-    h_flood: float = 3.0  # Flood threshold
-    h_drought: float = 0.3  # Drought threshold
+    h_wet: float = 1.0  # Second fix: Lowered from 1.5
+    h_flood: float = 2.5  # Second fix: Lowered from 3.0
+    h_drought: float = 0.15  # Second fix: Lowered from 0.3
 
 
 @dataclass
@@ -125,16 +125,40 @@ class DamConfig:
 
 @dataclass
 class PheromoneConfig:
-    """Ant-style pheromone parameters (§6)"""
-    # Evaporation rate
+    """
+    Multi-channel ant-style pheromone parameters (§6 + Enhancement #3)
+    
+    Supports specialized pheromone channels for different behaviors
+    """
+    # Base evaporation rate (used if channel-specific not provided)
     rho: float = 0.05
     
     # Deposition parameters
-    delta_0: float = 1.0  # Base deposition amount
+    delta: float = 1.0  # Base deposition amount (was delta_0)
+    delta_0: float = 1.0  # Backward compat alias
     
-    # Movement parameters
-    alpha: float = 1.0  # Pheromone influence
-    beta: float = 2.0  # Heuristic influence
+    # Movement probability parameters
+    alpha: float = 1.0  # Pheromone influence exponent
+    beta: float = 2.0  # Heuristic influence exponent
+    
+    # MULTI-CHANNEL: Channel-specific evaporation rates
+    # Different channels persist for different durations
+    channel_evaporation: Dict = field(default_factory=lambda: {
+        'FOOD': 0.1,          # Fast evaporation (food sources change)
+        'CONSTRUCTION': 0.05,  # Slow (construction sites persist)
+        'DANGER': 0.15,        # Very fast (danger is transient)
+        'RETURN_HOME': 0.08,   # Medium (stable path home)
+        'EXPLORATION': 0.12    # Fast (explore new areas)
+    })
+    
+    # Success-based deposition bonuses
+    food_success_bonus: float = 2.0    # Extra deposit when carrying food
+    build_success_bonus: float = 1.5   # Extra deposit when building
+    danger_intensity: float = 3.0      # Strong warning signal
+    
+    # Directional bias (boost trails aligned with target direction)
+    use_directional_bias: bool = True
+    directional_boost: float = 1.5  # Multiplier when aligned with target
 
 
 @dataclass
@@ -269,15 +293,15 @@ class RewardConfig:
     alpha_2: float = 5.0
     
     # Habitat complexity weight
-    alpha_3: float = 3.0
+    alpha_3: float = 5.0  # Second fix: Increased from 3.0 (boost habitat reward)
     
     # Penalty weights
-    beta_1: float = 10.0  # Flood penalty
-    beta_2: float = 8.0  # Drought penalty
-    beta_3: float = 15.0  # Structural failure penalty
+    beta_1: float = 5.0  # Second fix: Reduced from 10.0 (flood penalty)
+    beta_2: float = 4.0  # Second fix: Reduced from 8.0 (drought penalty)
+    beta_3: float = 8.0  # Second fix: Reduced from 15.0 (failure penalty)
     
     # Habitat suitability targets
-    h_star: float = 1.5
+    h_star: float = 0.7  # Second fix: Lowered from 1.5 (target water depth)
     v_star: float = 5.0
     lambda_h_habitat: float = 1.0
     lambda_v_habitat: float = 0.5
@@ -318,6 +342,101 @@ class VisualizationConfig:
     dpi: int = 150
 
 
+# ============================================================================
+# ENHANCEMENT CONFIGURATION SECTIONS
+# ============================================================================
+
+@dataclass
+class AgentMemoryConfig:
+    """Agent memory system configuration (Enhancement #1)"""
+    hidden_dim: int = 50
+    use_gru_memory: bool = True
+    buffer_size: int = 20
+    use_experience_replay: bool = True
+    track_visited_cells: bool = True
+    max_visited_history: int = 100
+    track_heuristic_performance: bool = True
+
+
+@dataclass
+class RoleSpecializationConfig:
+    """Role-specific network configuration (Enhancement #6)"""
+    use_role_specific_networks: bool = True
+    policy_hidden_dim: int = 128
+    gru_hidden_dim: int = 50
+    scout_exploration_bias: float = 0.5
+    worker_construction_bias: float = 0.5
+    guardian_stay_bias: float = 0.5
+    frustration_threshold: float = 10.0
+    frustration_decay_rate: float = 1.0
+    frustration_growth_rate: float = 2.0
+    allow_role_switching: bool = True
+    min_steps_before_switch: int = 100
+
+
+@dataclass
+class PhysarumAgentCouplingConfig:
+    """Physarum-agent integration configuration (Enhancement #2)"""
+    enable_physarum_guidance: bool = True
+    pheromone_weight: float = 0.3
+    physarum_weight: float = 0.4
+    heuristic_weight: float = 0.3
+    use_physarum_pathfinding: bool = True
+    max_path_search_steps: int = 100
+    track_physarum_usage: bool = True
+
+
+@dataclass
+class LocalPredictionConfig:
+    """Local predictive modeling configuration (Enhancement #5)"""
+    use_local_prediction: bool = True
+    local_obs_dim: int = 25
+    hidden_dim: int = 64
+    lstm_hidden_dim: int = 32
+    prediction_loss_weight: float = 0.1
+    train_predictor: bool = True
+    enable_terrain_rewards: bool = True
+    flood_prevention_reward: float = -10.0
+    drought_prevention_reward: float = -5.0
+    vegetation_reward: float = 2.0
+    stability_reward: float = -3.0
+    infrastructure_reward: float = 15.0
+
+
+@dataclass
+class PopulationDynamicsConfig:
+    """Population dynamics configuration (Enhancement #4 + #9)"""
+    enable_population_dynamics: bool = False  # Disabled by default (experimental)
+    max_population: int = 50
+    min_population: int = 10
+    initial_population: int = 30
+    enable_reproduction: bool = True
+    reproduction_threshold_population: int = 15
+    reproduction_energy_cost: float = 20.0
+    check_mortality: bool = True
+    starvation_threshold: float = 0.0
+    drowning_depth: float = 3.0
+    drowning_wetness: float = 0.8
+    enable_evolution: bool = True
+    mutation_rate: float = 0.05
+    crossover_rate: float = 0.7
+    tournament_size: int = 5
+    fitness_survival_weight: float = 1.0
+    fitness_dams_weight: float = 10.0
+    fitness_food_weight: float = 5.0
+    fitness_reward_weight: float = 0.1
+
+
+@dataclass
+class EnhancedAgentConfigExtensions:
+    """Agent enhancement configurations"""
+    memory: AgentMemoryConfig = field(default_factory=AgentMemoryConfig)
+    roles: RoleSpecializationConfig = field(default_factory=RoleSpecializationConfig)
+    physarum_coupling: PhysarumAgentCouplingConfig = field(default_factory=PhysarumAgentCouplingConfig)
+    prediction: LocalPredictionConfig = field(default_factory=LocalPredictionConfig)
+    population: PopulationDynamicsConfig = field(default_factory=PopulationDynamicsConfig)
+
+
 @dataclass
 class SimulationConfig:
     """Master configuration"""
@@ -333,6 +452,9 @@ class SimulationConfig:
     reward: RewardConfig = field(default_factory=RewardConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
+    
+    # ENHANCEMENTS (new)
+    agent_enhancements: EnhancedAgentConfigExtensions = field(default_factory=EnhancedAgentConfigExtensions)
     
     # Experiment settings
     experiment_name: str = "beaver_ecosystem"

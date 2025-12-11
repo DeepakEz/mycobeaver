@@ -412,3 +412,184 @@ class PhysarumNetwork:
         fraction = max_D / total
         
         return fraction > threshold
+    
+    def get_edge_conductivities(
+        self, 
+        commodity: CommodityType,
+        normalize: bool = True
+    ) -> Dict[Tuple[int, int], float]:
+        """
+        Export edge-wise conductivities for a specific commodity
+        
+        Returns dictionary mapping (i, j) tuples to conductivity values.
+        This is used for Physarum-hydrology coupling (§1.1, §3.5).
+        
+        CRITICAL ORDER:
+        1. Clip raw values to [0.1, 5.0] (prevent extremes)
+        2. THEN normalize to mean=1.0
+        This preserves relative variation while preventing runaway
+        
+        Args:
+            commodity: Which commodity to export conductivities for
+            normalize: If True, normalize conductivities to have mean=1.0
+                      This prevents runaway positive feedback loops
+            
+        Returns:
+            Dictionary of {(i, j): D_ij} for all edges
+        """
+        conductivities = {}
+        
+        for edge in self.edges:
+            D_value = self.state.D[edge][commodity]
+            # CLIP FIRST (before normalization)
+            # This ensures weak edges stay weak and strong edges stay strong
+            # relative to each other, even after normalization
+            D_clipped = np.clip(D_value, 0.1, 5.0)
+            conductivities[edge] = D_clipped
+        
+        # THEN normalize to mean=1.0 (after clipping)
+        if normalize and len(conductivities) > 0:
+            values = list(conductivities.values())
+            mean_D = np.mean(values)
+            
+            # Normalize so mean = 1.0
+            if mean_D > 1e-8:
+                conductivities = {
+                    edge: D / mean_D 
+                    for edge, D in conductivities.items()
+                }
+        
+        return conductivities
+    
+    # ========================================================================
+    # AGENT COUPLING INTERFACE (Enhancement #2)
+    # ========================================================================
+    
+    def get_neighbor_conductivities(
+        self,
+        cell_index: int,
+        neighbor_indices: List[int],
+        commodity: CommodityType = CommodityType.WATER
+    ) -> Dict[int, float]:
+        """
+        Get Physarum conductivities for agent's neighbors (Enhancement #2)
+        
+        This allows agents to use Physarum "highways" for pathfinding.
+        High conductivity = recommended transport corridor.
+        
+        Args:
+            cell_index: Agent's current cell
+            neighbor_indices: List of neighbor cells
+            commodity: Which commodity type to query
+        
+        Returns:
+            Dictionary mapping neighbor_index -> conductivity score [0, 1]
+        """
+        conductivities = {}
+        
+        for neighbor in neighbor_indices:
+            # Get edge key (canonical form)
+            edge_key = (min(cell_index, neighbor), max(cell_index, neighbor))
+            
+            if edge_key in self.state.D:
+                D_value = self.state.D[edge_key][commodity]
+                
+                # Normalize to [0, 1] range for agent scoring
+                # Physarum D is bounded [0.1, 5.0] and normalized to mean=1.0
+                # Map [0.3, 3.0] (after env clipping) to [0, 1]
+                D_normalized = np.clip((D_value - 0.3) / (3.0 - 0.3), 0.0, 1.0)
+                conductivities[neighbor] = D_normalized
+            else:
+                # No edge or zero conductivity
+                conductivities[neighbor] = 0.5  # Neutral score
+        
+        return conductivities
+    
+    def get_edge_desirability(
+        self,
+        from_cell: int,
+        to_cell: int,
+        commodity: CommodityType = CommodityType.WATER
+    ) -> float:
+        """
+        Get desirability score for a specific edge (Enhancement #2)
+        
+        Returns:
+            Score in [0, 1] where 1 = highly recommended path
+        """
+        edge_key = (min(from_cell, to_cell), max(from_cell, to_cell))
+        
+        if edge_key in self.state.D:
+            D_value = self.state.D[edge_key][commodity]
+            # Normalize to [0, 1]
+            return float(np.clip((D_value - 0.3) / (3.0 - 0.3), 0.0, 1.0))
+        else:
+            return 0.5  # Neutral
+    
+    def compute_shortest_path_via_physarum(
+        self,
+        start_cell: int,
+        end_cell: int,
+        max_steps: int = 100
+    ) -> Optional[List[int]]:
+        """
+        Compute path from start to end following Physarum conductivities
+        
+        Uses greedy best-first search guided by high-conductivity edges.
+        This is a simple heuristic - agents can follow this or deviate.
+        
+        Returns:
+            List of cell indices forming path, or None if no path found
+        """
+        if start_cell == end_cell:
+            return [start_cell]
+        
+        visited = {start_cell}
+        path = [start_cell]
+        current = start_cell
+        
+        for _ in range(max_steps):
+            # Get neighbors
+            if current not in self.neighbors:
+                break
+            
+            neighbors = self.neighbors[current]
+            
+            # Filter unvisited
+            unvisited = [n for n in neighbors if n not in visited]
+            if not unvisited:
+                break
+            
+            # Score by conductivity (prefer high D) and distance to goal
+            best_neighbor = None
+            best_score = -float('inf')
+            
+            for neighbor in unvisited:
+                # Conductivity score
+                D_score = self.get_edge_desirability(current, neighbor)
+                
+                # Distance to goal (simple Manhattan heuristic)
+                # Would need grid_width to compute properly - simplified here
+                distance_score = 0.0  # Placeholder
+                
+                # Combined score (bias toward high conductivity)
+                score = 0.7 * D_score + 0.3 * distance_score
+                
+                if score > best_score:
+                    best_score = score
+                    best_neighbor = neighbor
+            
+            if best_neighbor is None:
+                break
+            
+            path.append(best_neighbor)
+            visited.add(best_neighbor)
+            current = best_neighbor
+            
+            # Check if reached goal
+            if current == end_cell:
+                return path
+        
+        return None  # No path found
+        
+        return conductivities

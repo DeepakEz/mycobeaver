@@ -73,6 +73,20 @@ class Environment:
         
         # River source cells
         self.source_cells = self._define_source_cells()
+        
+        # Physarum network conductivity (for hydrology coupling)
+        # D_water[(i,j)] = conductivity of edge between cells i and j
+        self.physarum_D_water: Dict[Tuple[int, int], float] = {}
+        
+        # POPULATION DYNAMICS TRACKING (Enhancement #4 + #9)
+        self.birth_count_this_step = 0
+        self.death_count_this_step = 0
+        self.total_births = 0
+        self.total_deaths = 0
+        
+        # Terrain state tracking (for reward computation)
+        self.previous_terrain_state: Optional[Dict] = None
+        self.current_terrain_state: Optional[Dict] = None
     
     def _initialize_state(self) -> EnvironmentState:
         """Initialize environment state"""
@@ -231,6 +245,18 @@ class Environment:
         self.state.u_build = np.zeros(self.N)
         self.state.c_consume = np.zeros(self.N)
     
+    def set_physarum_conductivity(self, D_water: Dict[Tuple[int, int], float]):
+        """
+        Set Physarum network conductivity for hydrology coupling (§1.1, §3.5)
+        
+        This allows the Physarum slime network to directly affect
+        water flow paths in the hydrology simulation.
+        
+        Args:
+            D_water: Dictionary mapping (i, j) edges to conductivity values
+        """
+        self.physarum_D_water = D_water
+    
     def _update_rainfall(self) -> None:
         """Generate spatially varying rainfall"""
         mean_r = self.hydro_cfg.mean_rainfall
@@ -269,24 +295,93 @@ class Environment:
                     flow_out[i] += q_ij
                     flow_in[j] += q_ij
         
+        # Add boundary drainage (water escapes at edges)
+        boundary_drainage = self._compute_boundary_drainage()
+        
         # Compute losses
         losses = self._compute_losses()
         
         # Update water depth
-        dh = self.state.r + self.state.b + flow_in - flow_out - losses
+        dh = self.state.r + self.state.b + flow_in - flow_out - losses - boundary_drainage
         self.state.h = np.maximum(0, self.state.h + self.dt * dh)
+        
+        # SAFETY: Progressive overflow protection
+        max_h = np.max(self.state.h)
+        
+        # Warning at h > 3.0
+        if max_h > 3.0:
+            print(f"WARNING: Water depth high (max={max_h:.2f}), may need adjustment")
+        
+        # Emergency clamp at h > 5.0
+        if max_h > 5.0:
+            print(f"EMERGENCY: Clamping water depth from {max_h:.2f} to 5.0")
+            self.state.h = np.clip(self.state.h, 0, 5.0)
+        
+        # Catastrophic overflow protection
+        if np.any(np.isnan(self.state.h)) or np.any(np.isinf(self.state.h)):
+            print("CRITICAL ERROR: Numerical overflow in water depth!")
+            print(f"  max(h) = {np.max(self.state.h)}")
+            print(f"  max(dh) = {np.max(np.abs(dh))}")
+            print(f"  max(flow_in) = {np.max(flow_in)}")
+            print(f"  max(flow_out) = {np.max(flow_out)}")
+            print(f"  Applying emergency reset...")
+            self.state.h = np.clip(self.state.h, 0, 2.0)  # Reset to safe
+    
+    def _compute_boundary_drainage(self) -> np.ndarray:
+        """
+        Compute boundary drainage (water escaping at edges)
+        This prevents water accumulation at domain boundaries
+        
+        CRITICAL: Reduced from 10% to 2% per step to prevent complete drainage
+        """
+        drainage = np.zeros(self.N)
+        drainage_rate = 0.02  # 2% of water drains at boundaries per step (was 0.1)
+        
+        for i in range(self.N):
+            row, col = self._index_to_coords(i)
+            # Cells at edges lose extra water
+            if row == 0 or row == self.H - 1 or col == 0 or col == self.W - 1:
+                drainage[i] = drainage_rate * self.state.h[i]
+        
+        return drainage
     
     def _compute_conductance(self, i: int, j: int) -> float:
         """
-        Compute edge conductance (§3)
+        Compute edge conductance with Physarum coupling (§3, §1.1, §3.5)
         
-        g_{ij} = g_0 * f(d_i, d_j)
-        f(d_i, d_j) = (d_i + d_j) / 2
+        κ_{ij} = g_0 * φ(d_i, d_j) * ψ(z_i, z_j) * D_{ij}^{water}
+        
+        Where:
+        - φ(d_i, d_j) = (d_i + d_j) / 2  (dam component)
+        - ψ(z_i, z_j) = exp(-λ_z * |z_i - z_j|)  (terrain component)
+        - D_{ij}^{water} = Physarum conductivity (slime network component)
+        
+        CRITICAL: D_water comes pre-clipped and normalized from Physarum
+        We apply a final safety clip to [0.3, 3.0] (10x range) to preserve
+        variation while preventing extreme values
         """
+        # Dam component
         d_i = self.state.d[i]
         d_j = self.state.d[j]
-        f = 0.5 * (d_i + d_j)
-        return self.hydro_cfg.g0 * f
+        phi = 0.5 * (d_i + d_j)
+        
+        # Terrain component (higher elevation difference → lower conductivity)
+        z_i = self.state.z[i]
+        z_j = self.state.z[j]
+        lambda_z = 0.1  # Terrain resistance coefficient
+        psi = np.exp(-lambda_z * abs(z_i - z_j))
+        
+        # Physarum component (slime network conductivity)
+        # Comes pre-clipped to [0.1, 5.0] and normalized to mean=1.0
+        # Apply final safety clip to [0.3, 3.0] (10x range, wider than before)
+        edge_key = (min(i, j), max(i, j))  # Canonical edge representation
+        D_water_raw = self.physarum_D_water.get(edge_key, 1.0)
+        D_water = np.clip(D_water_raw, 0.3, 3.0)  # Safety bounds (wider than [0.5, 2.0])
+        
+        # Total conductance
+        kappa = phi * psi * D_water
+        
+        return self.hydro_cfg.g0 * kappa
     
     def _compute_losses(self) -> np.ndarray:
         """
@@ -412,3 +507,123 @@ class Environment:
         return {
             'num_flood_cells': int(num_flood)
         }
+    
+    # ========================================================================
+    # POPULATION DYNAMICS & TERRAIN REWARDS (Enhancement #5 + #9)
+    # ========================================================================
+    
+    def capture_terrain_state(self) -> Dict:
+        """
+        Capture current terrain state for reward computation
+        
+        Returns snapshot of key metrics for before/after comparison
+        """
+        flood_cells = np.sum(self.state.h > self.hydro_cfg.h_flood)
+        drought_cells = np.sum(self.state.h < self.hydro_cfg.h_drought)
+        
+        terrain_state = {
+            'flood_cells': int(flood_cells),
+            'drought_cells': int(drought_cells),
+            'total_vegetation': float(np.sum(self.state.v)),
+            'water_variance': float(np.var(self.state.h)),
+            'mean_water_depth': float(np.mean(self.state.h)),
+            'strong_dams': int(np.sum(self.state.d < 0.5)),
+        }
+        
+        return terrain_state
+    
+    def compute_terrain_rewards(
+        self,
+        agent_positions: Dict[int, int]
+    ) -> Dict[int, Dict[str, float]]:
+        """
+        Compute terrain-based rewards for all agents (Enhancement #5)
+        
+        Compares before/after terrain state to reward agents for
+        improving the environment
+        
+        Args:
+            agent_positions: Mapping of agent_id -> cell_index
+        
+        Returns:
+            Dict mapping agent_id -> reward_components
+        """
+        if self.previous_terrain_state is None:
+            # First step, no comparison possible
+            return {agent_id: {} for agent_id in agent_positions.keys()}
+        
+        # Capture current state
+        current = self.capture_terrain_state()
+        previous = self.previous_terrain_state
+        
+        # Compute global changes
+        Δflooding = current['flood_cells'] - previous['flood_cells']
+        Δdrought = current['drought_cells'] - previous['drought_cells']
+        Δvegetation = current['total_vegetation'] - previous['total_vegetation']
+        Δwater_var = current['water_variance'] - previous['water_variance']
+        Δdams = current['strong_dams'] - previous['strong_dams']
+        
+        # Shared rewards (all agents benefit from improvements)
+        shared_rewards = {
+            'flood_prevention': -10.0 * Δflooding,
+            'drought_prevention': -5.0 * Δdrought,
+            'vegetation_growth': 2.0 * Δvegetation,
+            'water_stability': -3.0 * Δwater_var,
+            'infrastructure': 15.0 * max(0, Δdams)  # Reward for building dams
+        }
+        
+        # Compute per-agent rewards
+        agent_rewards = {}
+        
+        for agent_id, position in agent_positions.items():
+            rewards = shared_rewards.copy()
+            
+            # Local rewards (based on agent's location)
+            local_h = self.state.h[position]
+            
+            # Reward for being near improved areas
+            if previous['flood_cells'] > current['flood_cells']:
+                # Check if agent near previously flooded area
+                was_flooded = self.state.h[position] > self.hydro_cfg.h_flood
+                if was_flooded and local_h <= self.hydro_cfg.h_flood:
+                    rewards['local_flood_fix'] = 20.0
+            
+            if previous['drought_cells'] > current['drought_cells']:
+                # Check if agent near previously dry area
+                was_dry = self.state.h[position] < self.hydro_cfg.h_drought
+                if was_dry and local_h >= self.hydro_cfg.h_drought:
+                    rewards['local_drought_fix'] = 15.0
+            
+            agent_rewards[agent_id] = rewards
+        
+        return agent_rewards
+    
+    def begin_step(self):
+        """Call at start of environment step to capture state"""
+        self.previous_terrain_state = self.current_terrain_state
+        self.current_terrain_state = self.capture_terrain_state()
+        
+        # Reset per-step counters
+        self.birth_count_this_step = 0
+        self.death_count_this_step = 0
+    
+    def record_birth(self):
+        """Record that an agent was born this step"""
+        self.birth_count_this_step += 1
+        self.total_births += 1
+    
+    def record_death(self):
+        """Record that an agent died this step"""
+        self.death_count_this_step += 1
+        self.total_deaths += 1
+    
+    def get_population_statistics(self) -> Dict[str, int]:
+        """Get population dynamics statistics"""
+        return {
+            'births_this_step': self.birth_count_this_step,
+            'deaths_this_step': self.death_count_this_step,
+            'total_births': self.total_births,
+            'total_deaths': self.total_deaths,
+            'net_population_change': self.total_births - self.total_deaths
+        }
+

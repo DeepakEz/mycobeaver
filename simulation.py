@@ -201,6 +201,15 @@ class BeaverEcosystemSimulation:
         # 6. Step pheromones
         self.pheromones.step(dt)
         
+        # 6.5. Update Physarum-hydrology coupling (§1.1, §3.5)
+        # Export Physarum water conductivities and pass to environment
+        # IMPORTANT: Use normalize=True to prevent runaway positive feedback
+        physarum_water_conductivity = self.physarum.get_edge_conductivities(
+            CommodityType.WATER,
+            normalize=True  # Normalize to mean=1.0 for stability
+        )
+        self.environment.set_physarum_conductivity(physarum_water_conductivity)
+        
         # 7. Step environment
         self.environment.step()
         

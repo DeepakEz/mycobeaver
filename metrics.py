@@ -314,3 +314,63 @@ class MetricsCalculator:
         }
         
         return all_metrics
+
+
+class WisdomNormalizer:
+    """
+    Wisdom signal normalizer (§3.6)
+    
+    Normalizes raw wisdom values to z-scores in [-3, 3] range
+    using sliding window statistics.
+    
+    This makes wisdom values interpretable and prevents
+    Overmind from being confused by changing scales.
+    """
+    
+    def __init__(self, window_size: int = 100):
+        self.window_size = window_size
+        self.wisdom_history: List[float] = []
+    
+    def normalize(self, raw_wisdom: float) -> float:
+        """
+        Normalize wisdom to z-score
+        
+        z = (w - μ) / σ
+        
+        Clipped to [-3, 3] range for stability
+        """
+        # Add to history
+        self.wisdom_history.append(raw_wisdom)
+        if len(self.wisdom_history) > self.window_size:
+            self.wisdom_history.pop(0)
+        
+        # Need at least 2 values for std
+        if len(self.wisdom_history) < 2:
+            return 0.0
+        
+        # Compute statistics
+        mean = np.mean(self.wisdom_history)
+        std = np.std(self.wisdom_history)
+        
+        # Avoid division by zero
+        if std < 1e-8:
+            return 0.0
+        
+        # Z-score
+        z = (raw_wisdom - mean) / std
+        
+        # Clip to [-3, 3]
+        z_clipped = np.clip(z, -3.0, 3.0)
+        
+        return z_clipped
+    
+    def get_stats(self) -> Dict[str, float]:
+        """Get current normalization statistics"""
+        if len(self.wisdom_history) < 2:
+            return {'mean': 0.0, 'std': 1.0, 'n': 0}
+        
+        return {
+            'mean': np.mean(self.wisdom_history),
+            'std': np.std(self.wisdom_history),
+            'n': len(self.wisdom_history)
+        }
